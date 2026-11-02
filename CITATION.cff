@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Structura: Incremental Structure-from-Motion and Point-Cloud Processing"
+authors:
+  - family-names: Le
+    given-names: Dang Truong Minh
+    affiliation: Mohamed bin Zayed University of Artificial Intelligence
+repository-code: "https://github.com/dangaura-tech/structura"
+license: MIT
+version: 0.1.0
