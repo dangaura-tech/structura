@@ -15,6 +15,7 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "opencv-python-headless>=4.8", "Pi
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff"]
+clip = ["torch>=2.1", "open_clip_torch>=2.24"]
 
 [project.scripts]
 structura-reconstruct = "structura.cli:reconstruct"
