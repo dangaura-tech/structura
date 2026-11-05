@@ -4,7 +4,8 @@
     python tools/reconstruct.py --images path/to/images --out output/scene [--focal 1.2] [--gif]
 
 Outputs: ``points.ply`` (coloured sparse cloud), ``colmap/`` (cameras/images/points3D.txt,
-loadable in the COLMAP GUI) and optionally ``turntable.gif``.
+loadable in the COLMAP GUI), ``reconstruction.npz`` (for ``tools/query3d.py``) and optionally
+``turntable.gif``.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from structura import IncrementalSfM, Intrinsics, SfMConfig  # noqa: E402
 from structura.features import detect, match_all  # noqa: E402
-from structura.io import export_colmap_text, write_ply  # noqa: E402
+from structura.io import export_colmap_text, save_reconstruction, write_ply  # noqa: E402
 from structura.pointcloud import remove_statistical_outliers  # noqa: E402
 
 EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -63,7 +64,9 @@ def main() -> None:
     out = Path(args.out)
     keep = remove_statistical_outliers(rec.points) if rec.num_points > 20 else slice(None)
     write_ply(str(out / "points.ply"), rec.points[keep], rec.colors[keep])
+    names = {i: str(f.resolve()) for i, f in enumerate(files)}
     export_colmap_text(rec, kps, str(out / "colmap"), names={i: f.name for i, f in enumerate(files)})
+    save_reconstruction(str(out / "reconstruction.npz"), rec, names)
     if args.gif:
         from structura.render import save_gif, turntable
 

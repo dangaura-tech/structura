@@ -99,3 +99,36 @@ def export_colmap_text(rec: Reconstruction, keypoints: Dict[int, np.ndarray], ou
         for p, (X, col, track) in enumerate(zip(rec.points, rec.colors, rec.point_tracks, strict=True)):
             tr = " ".join(f"{img + 1} {kp}" for img, kp in track.items() if img in rec.cameras)
             f.write(f"{p + 1} {X[0]} {X[1]} {X[2]} {col[0]} {col[1]} {col[2]} 0 {tr}\n")
+
+
+def save_reconstruction(path: str, rec: Reconstruction, image_names: Optional[Dict[int, str]] = None) -> None:
+    """Save cameras, points and colours (not tracks) to a compact ``.npz`` for later querying."""
+    import json
+
+    ids = sorted(rec.cameras)
+    k = [rec.cameras[i].intrinsics for i in ids]
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        points=rec.points,
+        colors=rec.colors,
+        camera_ids=np.array(ids, int),
+        R=np.stack([rec.cameras[i].R for i in ids]) if ids else np.zeros((0, 3, 3)),
+        t=np.stack([rec.cameras[i].t for i in ids]) if ids else np.zeros((0, 3)),
+        K=np.array([[c.fx, c.fy, c.cx, c.cy, c.width, c.height] for c in k], float).reshape(-1, 6),
+        names=json.dumps({str(i): n for i, n in (image_names or {}).items()}),
+    )
+
+
+def load_reconstruction(path: str) -> Tuple[Reconstruction, Dict[int, str]]:
+    import json
+
+    from .camera import Camera, Intrinsics
+
+    d = np.load(path, allow_pickle=False)
+    cams = {}
+    for i, R, t, k in zip(d["camera_ids"], d["R"], d["t"], d["K"], strict=True):
+        cams[int(i)] = Camera(Intrinsics(k[0], k[1], k[2], k[3], int(k[4]), int(k[5])), R, t)
+    rec = Reconstruction(cameras=cams, points=d["points"], colors=d["colors"])
+    names = {int(i): n for i, n in json.loads(str(d["names"])).items()}
+    return rec, names
