@@ -19,7 +19,7 @@ jobs:
           cache: pip
       - name: Install (CPU PyTorch + OpenCLIP for the vision-language tests)
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev,clip]"
       - run: ruff check .
       - run: pytest -q
