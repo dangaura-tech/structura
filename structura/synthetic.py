@@ -54,7 +54,9 @@ def make_scene(
     outlier_ratio: float = 0.1,
     image_size: Tuple[int, int] = (1024, 768),
     seed: int = 0,
+    distortion: Tuple[float, float] = (0.0, 0.0),
 ) -> SyntheticScene:
+    """``distortion = (k1, k2)`` renders the keypoints through a radially distorted lens."""
     rng = np.random.default_rng(seed)
     objs = [
         (_sphere(rng, points_per_object, np.array([0.0, -1.0, 0.0]), 1.0), (230, 90, 70)),
@@ -68,7 +70,7 @@ def make_scene(
     colors = np.clip(colors + rng.normal(0, 12, colors.shape), 0, 255).astype(np.uint8)
 
     w, h = image_size
-    K = Intrinsics(0.9 * w, 0.9 * w, w / 2, h / 2, w, h)
+    K = Intrinsics(0.9 * w, 0.9 * w, w / 2, h / 2, w, h, *distortion)
     cams, intr, kps, kpp, kpc = {}, {}, {}, {}, {}
     for i in range(num_cameras):
         a = 2 * np.pi * i / num_cameras

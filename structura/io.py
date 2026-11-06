@@ -66,7 +66,11 @@ def read_ply(path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
 
 
 def export_colmap_text(rec: Reconstruction, keypoints: Dict[int, np.ndarray], out_dir: str, names=None) -> None:
-    """Write cameras.txt / images.txt / points3D.txt (COLMAP text model, PINHOLE cameras)."""
+    """Write cameras.txt / images.txt / points3D.txt (COLMAP text model).
+
+    Distortion-free cameras are written as ``PINHOLE``; cameras with radial distortion as
+    ``OPENCV`` (fx fy cx cy k1 k2 p1 p2, tangential terms zero), which COLMAP reads directly.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     ids = sorted(rec.cameras)
@@ -76,10 +80,13 @@ def export_colmap_text(rec: Reconstruction, keypoints: Dict[int, np.ndarray], ou
             if img in rec.cameras:
                 obs[img].append((kp, p))
     with open(out / "cameras.txt", "w") as f:
-        f.write("# CAMERA_ID MODEL WIDTH HEIGHT fx fy cx cy\n")
+        f.write("# CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]\n")
         for i in ids:
             k = rec.cameras[i].intrinsics
-            f.write(f"{i + 1} PINHOLE {k.width} {k.height} {k.fx} {k.fy} {k.cx} {k.cy}\n")
+            if k.has_distortion:
+                f.write(f"{i + 1} OPENCV {k.width} {k.height} {k.fx} {k.fy} {k.cx} {k.cy} {k.k1} {k.k2} 0 0\n")
+            else:
+                f.write(f"{i + 1} PINHOLE {k.width} {k.height} {k.fx} {k.fy} {k.cx} {k.cy}\n")
     with open(out / "images.txt", "w") as f:
         f.write("# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME\n# POINTS2D[] as (X, Y, POINT3D_ID)\n")
         for i in ids:
@@ -115,7 +122,7 @@ def save_reconstruction(path: str, rec: Reconstruction, image_names: Optional[Di
         camera_ids=np.array(ids, int),
         R=np.stack([rec.cameras[i].R for i in ids]) if ids else np.zeros((0, 3, 3)),
         t=np.stack([rec.cameras[i].t for i in ids]) if ids else np.zeros((0, 3)),
-        K=np.array([[c.fx, c.fy, c.cx, c.cy, c.width, c.height] for c in k], float).reshape(-1, 6),
+        K=np.array([[c.fx, c.fy, c.cx, c.cy, c.width, c.height, c.k1, c.k2] for c in k], float).reshape(-1, 8),
         names=json.dumps({str(i): n for i, n in (image_names or {}).items()}),
     )
 
@@ -128,7 +135,8 @@ def load_reconstruction(path: str) -> Tuple[Reconstruction, Dict[int, str]]:
     d = np.load(path, allow_pickle=False)
     cams = {}
     for i, R, t, k in zip(d["camera_ids"], d["R"], d["t"], d["K"], strict=True):
-        cams[int(i)] = Camera(Intrinsics(k[0], k[1], k[2], k[3], int(k[4]), int(k[5])), R, t)
+        dist = (float(k[6]), float(k[7])) if len(k) >= 8 else (0.0, 0.0)  # files written before distortion support
+        cams[int(i)] = Camera(Intrinsics(k[0], k[1], k[2], k[3], int(k[4]), int(k[5]), *dist), R, t)
     rec = Reconstruction(cameras=cams, points=d["points"], colors=d["colors"])
     names = {int(i): n for i, n in json.loads(str(d["names"])).items()}
     return rec, names
