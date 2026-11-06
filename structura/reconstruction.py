@@ -7,12 +7,18 @@
    (PnP + RANSAC), triangulate new tracks it shares with registered images, and filter
    points with large reprojection error or small triangulation angle.
 4. Run global bundle adjustment after every few registrations and at the end.
+
+Lens distortion: all minimal solvers (essential matrix, PnP, DLT triangulation) assume a
+pinhole camera, so they run on *undistorted* keypoints, while bundle adjustment and the
+reprojection checks compare the full camera model against the *observed* keypoints. When
+``refine_intrinsics`` is enabled, focal length and radial distortion are refined in BA once
+enough images are registered, and the undistorted keypoints are recomputed after each BA.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -36,8 +42,11 @@ class SfMConfig:
     min_pnp_inliers: int = 15
     ba_every: int = 3
     ba_max_nfev: int = 50
+    final_ba_max_nfev: int = 200  # budget of the last BA when intrinsics are refined (they converge slowly)
     verify_matches: bool = True
     min_verified_matches: int = 30
+    refine_intrinsics: str = "none"  # "none" | "focal" | "radial" (focal + k1, k2)
+    min_images_for_intrinsics: int = 4  # self-calibration is unreliable with fewer views
 
 
 @dataclass
@@ -81,9 +90,12 @@ class IncrementalSfM:
         config: Optional[SfMConfig] = None,
         colors: Optional[Dict[int, np.ndarray]] = None,
     ) -> None:
-        self.K = intrinsics
+        # private copies (keeping shared objects shared) so intrinsic refinement never mutates the caller's data
+        copies: Dict[int, Intrinsics] = {}
+        self.K = {i: copies.setdefault(id(k), replace(k)) for i, k in intrinsics.items()}
         self.kps = {i: np.asarray(k, float) for i, k in keypoints.items()}
         self.cfg = config or SfMConfig()
+        self._undistort()
         raw = {k: np.asarray(v, int) for k, v in matches.items() if len(v)}
         self.matches = self._verify(raw) if self.cfg.verify_matches else raw
         self.kp_colors = colors or {}
@@ -104,16 +116,23 @@ class IncrementalSfM:
         for (i, j), m in raw.items():
             if len(m) < self.cfg.min_verified_matches:
                 continue
-            res = relative_pose(self.kps[i][m[:, 0]], self.kps[j][m[:, 1]], self.K[i], self.cfg.ransac_threshold)
+            res = relative_pose(self.kps_ud[i][m[:, 0]], self.kps_ud[j][m[:, 1]], self.K[i], self.cfg.ransac_threshold)
             if res is not None and res.num_inliers >= self.cfg.min_verified_matches:
                 out[(i, j)] = m[res.inliers]
         log.info("geometric verification kept %d / %d pairs", len(out), len(raw))
         return out
 
     # ------------------------------------------------------------------ helpers
-    def _track_obs(self, t: int, img: int) -> Optional[np.ndarray]:
+    def _undistort(self) -> None:
+        """Pinhole-equivalent keypoints for the minimal solvers (identical when there is no distortion)."""
+        self.kps_ud = {
+            i: self.K[i].undistort_pixels(k) if self.K[i].has_distortion and len(k) else k for i, k in self.kps.items()
+        }
+
+    def _track_obs(self, t: int, img: int, undistorted: bool = False) -> Optional[np.ndarray]:
+        kps = self.kps_ud if undistorted else self.kps
         kp = self.tracks[t].get(img)
-        return None if kp is None else self.kps[img][kp]
+        return None if kp is None else kps[img][kp]
 
     def _color(self, track: Dict[int, int]) -> np.ndarray:
         cols = [self.kp_colors[i][k] for i, k in track.items() if i in self.kp_colors]
@@ -133,7 +152,7 @@ class IncrementalSfM:
         for (i, j), m in sorted(self.matches.items(), key=lambda kv: -len(kv[1])):
             if len(m) < self.cfg.min_init_inliers:
                 continue
-            x1, x2 = self.kps[i][m[:, 0]], self.kps[j][m[:, 1]]
+            x1, x2 = self.kps_ud[i][m[:, 0]], self.kps_ud[j][m[:, 1]]
             res = relative_pose(x1, x2, self.K[i], self.cfg.ransac_threshold)  # assumes shared K for the pair
             if res is None or res.num_inliers < self.cfg.min_init_inliers:
                 continue
@@ -163,7 +182,7 @@ class IncrementalSfM:
 
     def _register(self, img: int, track_ids: List[int]) -> bool:
         X = self.rec.points[[self._track_point[t] for t in track_ids]]
-        x = np.stack([self._track_obs(t, img) for t in track_ids])
+        x = np.stack([self._track_obs(t, img, undistorted=True) for t in track_ids])
         res = absolute_pose(X, x, self.K[img], self.cfg.pnp_threshold)
         if res is None or res[2].sum() < self.cfg.min_pnp_inliers:
             return False
@@ -184,7 +203,9 @@ class IncrementalSfM:
             # use the partner with the widest baseline
             other = max(others, key=lambda o: np.linalg.norm(self.rec.cameras[o].center - cam.center))
             c2 = self.rec.cameras[other]
-            X = triangulate_dlt(cam.P, c2.P, self._track_obs(t, img)[None], self._track_obs(t, other)[None])
+            X = triangulate_dlt(
+                cam.P, c2.P, self._track_obs(t, img, True)[None], self._track_obs(t, other, True)[None]
+            )
             if not self._valid(X, track, (cam.center, c2.center)):
                 continue
             new_ids.append(t)
@@ -205,12 +226,20 @@ class IncrementalSfM:
         return True
 
     # ---------------------------------------------------------------- refinement
-    def bundle_adjust(self, fixed_first: int) -> BAResult:
+    def bundle_adjust(self, fixed_first: int, max_nfev: Optional[int] = None) -> BAResult:
         cam_idx, pt_idx, obs = self.rec.observations(self.kps)
+        intrinsics = self.cfg.refine_intrinsics
+        if len(self.rec.cameras) < self.cfg.min_images_for_intrinsics:
+            intrinsics = "none"
         res = bundle_adjust(
-            self.rec.cameras, self.rec.points, cam_idx, pt_idx, obs, fixed=[fixed_first], max_nfev=self.cfg.ba_max_nfev
-        )
+            self.rec.cameras, self.rec.points, cam_idx, pt_idx, obs, fixed=[fixed_first],
+            max_nfev=max_nfev or self.cfg.ba_max_nfev, refine_intrinsics=intrinsics,
+        )  # fmt: skip
         self.ba_history.append(res)
+        if intrinsics != "none":
+            self._undistort()
+            k = self.rec.cameras[fixed_first].intrinsics
+            log.info("intrinsics: f=%.1f k1=%.4f k2=%.4f", k.fx, k.k1, k.k2)
         self._filter_points()
         log.info("bundle adjustment: rmse %.3f -> %.3f px", res.initial_rmse, res.final_rmse)
         return res
@@ -254,7 +283,7 @@ class IncrementalSfM:
             if since_ba >= self.cfg.ba_every:
                 self.bundle_adjust(first)
                 since_ba = 0
-        self.bundle_adjust(first)
+        self.bundle_adjust(first, self.cfg.final_ba_max_nfev if self.cfg.refine_intrinsics != "none" else None)
         log.info(
             "done: %d / %d images registered, %d points", len(self.rec.cameras), len(self.kps), self.rec.num_points
         )
