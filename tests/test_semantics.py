@@ -133,7 +133,8 @@ def test_maskclip_prefix_matches_open_clip_forward(vit):
         vit.visual(img)
         ours, gh, gw = maskclip_tokens_before_last_block(vit.visual, img)
     handle.remove()
-    ref = captured["x"] if vit.visual.transformer.batch_first else captured["x"].permute(1, 0, 2)
+    batch_first = getattr(vit.visual.transformer, "batch_first", True)  # open_clip >= 4 is always batch-first
+    ref = captured["x"] if batch_first else captured["x"].permute(1, 0, 2)
     assert (gh, gw) == (14, 14)
     torch.testing.assert_close(ours, ref, atol=1e-5, rtol=1e-5)
 
