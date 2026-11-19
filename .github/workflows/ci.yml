@@ -27,3 +27,7 @@ jobs:
         run: python tools/demo_synthetic.py --cameras 8 --points-per-object 200
       - name: Synthetic language-driven query
         run: python tools/demo_semantics.py --cameras 8 --points-per-object 400
+      - name: Image-based reconstruction + dense multi-view stereo
+        run: |
+          python tools/demo_images.py --views 10 --out output/ci
+          python tools/densify.py --recon output/ci/reconstruction/reconstruction.npz --out output/ci/dense.ply --depths 48
